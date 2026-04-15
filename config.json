@@ -1,0 +1,48 @@
+{
+  "min_ev_threshold": 0.06,
+  "min_delta": 0.12,
+  "min_time_remaining_s": 300,
+  "max_time_remaining_s": 2592000,
+  "max_position_pct": 0.04,
+  "kelly_fraction": 0.25,
+  "min_contract_price": 0.05,
+  "max_contract_price": 0.95,
+  "max_market_overround_bps": 300,
+  "min_volume_24h": 5000,
+  "min_open_interest": 1000,
+  "max_spread": 0.05,
+  "whale_min_trade_usd": 500,
+  "whale_pressure_window_s": 300,
+  "whale_min_count_for_signal": 3,
+  "llm_validation_enabled": true,
+  "llm_min_whale_score": 0.5,
+  "llm_cache_ttl_s": 600,
+  "orderbook_manipulation_threshold": 0.60,
+  "market_rescan_interval_s": 60,
+  "whale_poll_interval_s": 15,
+  "setup_quality_gate_enabled": true,
+  "setup_quality_min_sample": 10,
+  "setup_quality_min_wr": 0.52,
+
+  "paper_trading": {
+    "max_concurrent_positions": 8,
+    "max_symbol_exposure_pct": 0.12,
+    "daily_loss_limit_pct": 0.05,
+    "trailing_stop_activation": 0.15,
+    "trailing_stop_distance": 0.10,
+    "consecutive_loss_threshold": 3,
+    "consecutive_loss_cooldown_s": 1800,
+    "slippage_impact_factor": 0.002,
+    "min_fill_depth_score": 0.10,
+    "partial_fill_depth_threshold": 0.25,
+    "equity_snapshot_interval_s": 60
+  },
+
+  "category_overrides": {
+    "BTC": {
+      "min_delta": 0.20,
+      "min_ev_threshold": 0.25,
+      "min_time_remaining_s": 600
+    }
+  }
+}

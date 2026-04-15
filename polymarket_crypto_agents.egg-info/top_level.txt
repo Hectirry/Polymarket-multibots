@@ -1,0 +1,8 @@
+backtesting
+core
+dashboard
+engine
+execution
+feeds
+intelligence
+venv

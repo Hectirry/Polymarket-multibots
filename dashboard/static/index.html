@@ -1,0 +1,428 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Polymarket Crypto Agents</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: "Cascadia Code", "Fira Code", monospace; background: #0d1117; color: #c9d1d9; font-size: 13px; line-height: 1.5; }
+
+    header { background: #161b22; border-bottom: 1px solid #30363d; padding: 12px 20px; display: flex; justify-content: space-between; align-items: center; }
+    header h1 { font-size: 16px; color: #58a6ff; }
+    #mode-badge { padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: bold; letter-spacing: 1px; background: #1f6feb; color: #fff; }
+    #last-update { font-size: 11px; color: #6e7681; }
+
+    /* Stat grid */
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; padding: 14px; }
+    .stat-card { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 12px; }
+    .stat-card .label { font-size: 11px; color: #8b949e; margin-bottom: 2px; }
+    .stat-card .value { font-size: 20px; color: #e6edf3; }
+    .stat-card .value.pos { color: #3fb950; } .stat-card .value.neg { color: #f85149; }
+    .stat-card .sub { font-size: 10px; color: #6e7681; margin-top: 2px; }
+
+    /* Two-column layout */
+    .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; padding: 0 14px 14px; }
+    @media (max-width: 900px) { .two-col { grid-template-columns: 1fr; } }
+
+    section { margin: 0 14px 18px; }
+    section h2 { font-size: 12px; color: #8b949e; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; border-bottom: 1px solid #21262d; padding-bottom: 4px; }
+
+    /* Analytics panel */
+    .analytics-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; }
+    .metric { background: #0d1117; border: 1px solid #21262d; border-radius: 4px; padding: 8px; }
+    .metric .k { font-size: 10px; color: #6e7681; } .metric .v { font-size: 15px; }
+
+    /* Equity curve */
+    #equity-chart { width: 100%; height: 140px; background: #0d1117; border: 1px solid #21262d; border-radius: 4px; display: block; }
+
+    /* By-symbol table */
+    .sym-table { width: 100%; border-collapse: collapse; }
+    .sym-table th { text-align: left; font-size: 10px; color: #6e7681; padding: 3px 6px; border-bottom: 1px solid #21262d; }
+    .sym-table td { padding: 4px 6px; font-size: 12px; border-bottom: 1px solid #21262d; }
+
+    /* Data tables */
+    table { width: 100%; border-collapse: collapse; }
+    thead th { text-align: left; color: #8b949e; font-size: 11px; padding: 4px 8px; border-bottom: 1px solid #21262d; }
+    tbody tr:hover { background: #161b22; }
+    tbody td { padding: 5px 8px; font-size: 12px; border-bottom: 1px solid #21262d; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
+
+    .tag { display: inline-block; padding: 1px 5px; border-radius: 3px; font-size: 11px; font-weight: bold; }
+    .tag-yes { background: #1a4080; color: #58a6ff; } .tag-no { background: #3d1a1a; color: #f85149; }
+    .tag-open { background: #1a3a1a; color: #3fb950; } .tag-closed { background: #21262d; color: #6e7681; }
+    .tag-stop_loss,.tag-trailing_stop { background: #3d1a1a; color: #f85149; }
+    .tag-market_resolved { background: #1a3a1a; color: #3fb950; }
+    .tag-lock_profit_near_expiry { background: #2a2a10; color: #e3b341; }
+    .tag-daily_loss_limit { background: #3d1a1a; color: #ff7b72; }
+
+    .pnl-pos { color: #3fb950; } .pnl-neg { color: #f85149; }
+    .empty { color: #6e7681; text-align: center; padding: 16px; font-style: italic; }
+    #error-bar { display: none; background: #3d1a1a; color: #f85149; padding: 8px 16px; font-size: 12px; }
+
+    /* Wallet risk panel */
+    .risk-bar { height: 6px; border-radius: 3px; background: #21262d; margin-top: 4px; overflow: hidden; }
+    .risk-bar-fill { height: 100%; border-radius: 3px; transition: width 0.4s; }
+    .risk-ok { background: #3fb950; } .risk-warn { background: #e3b341; } .risk-crit { background: #f85149; }
+
+    /* Close reasons donut (simple bar) */
+    .reason-bar { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 6px; }
+    .reason-chip { font-size: 10px; padding: 2px 7px; border-radius: 10px; background: #21262d; color: #8b949e; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>Polymarket Crypto Agents — Paper Trading</h1>
+  <div style="display:flex;gap:12px;align-items:center">
+    <span id="mode-badge">—</span>
+    <span id="last-update">Connecting…</span>
+  </div>
+</header>
+<div id="error-bar"></div>
+
+<!-- Top stat strip -->
+<div class="grid" id="stat-grid">
+  <div class="stat-card"><div class="label">NAV</div><div class="value" id="s-nav">—</div><div class="sub" id="s-return">—</div></div>
+  <div class="stat-card"><div class="label">Cash Available</div><div class="value" id="s-cash">—</div></div>
+  <div class="stat-card"><div class="label">Realized P&amp;L</div><div class="value" id="s-rpnl">—</div></div>
+  <div class="stat-card"><div class="label">Unrealized P&amp;L</div><div class="value" id="s-upnl">—</div></div>
+  <div class="stat-card"><div class="label">Open Positions</div><div class="value" id="s-open">—</div></div>
+  <div class="stat-card"><div class="label">Win Rate</div><div class="value" id="s-wr">—</div></div>
+  <div class="stat-card"><div class="label">Sharpe</div><div class="value" id="s-sharpe">—</div></div>
+  <div class="stat-card"><div class="label">Max Drawdown</div><div class="value" id="s-mdd">—</div></div>
+</div>
+
+<!-- Equity curve + Analytics side by side -->
+<div class="two-col">
+  <section>
+    <h2>Equity Curve (NAV)</h2>
+    <canvas id="equity-chart"></canvas>
+  </section>
+
+  <section>
+    <h2>Performance Metrics</h2>
+    <div class="analytics-grid" id="analytics-grid">
+      <div class="metric"><div class="k">Profit Factor</div><div class="v" id="a-pf">—</div></div>
+      <div class="metric"><div class="k">Expectancy</div><div class="v" id="a-exp">—</div></div>
+      <div class="metric"><div class="k">Total Trades</div><div class="v" id="a-total">—</div></div>
+      <div class="metric"><div class="k">Avg Hold</div><div class="v" id="a-hold">—</div></div>
+      <div class="metric"><div class="k">Streak</div><div class="v" id="a-streak">—</div></div>
+      <div class="metric"><div class="k">Total Slippage</div><div class="v" id="a-slip">—</div></div>
+      <div class="metric"><div class="k">Total Fees</div><div class="v" id="a-fees">—</div></div>
+      <div class="metric"><div class="k">Curr Drawdown</div><div class="v" id="a-cdd">—</div></div>
+    </div>
+    <div style="margin-top:12px">
+      <div style="font-size:11px;color:#6e7681;margin-bottom:4px">CLOSE REASONS</div>
+      <div class="reason-bar" id="reason-bar"></div>
+    </div>
+  </section>
+</div>
+
+<!-- Wallet risk panel -->
+<section>
+  <h2>Wallet Risk Controls</h2>
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px" id="wallet-panel">
+    <div class="metric"><div class="k">Consecutive Losses</div><div class="v" id="w-closs">—</div></div>
+    <div class="metric"><div class="k">Daily Loss Limit</div><div class="v" id="w-dll">—</div><div class="risk-bar"><div class="risk-bar-fill" id="w-dll-bar" style="width:0%"></div></div></div>
+    <div class="metric"><div class="k">Cooldown</div><div class="v" id="w-cd">—</div></div>
+    <div class="metric"><div class="k">Drawdown</div><div class="v" id="w-dd">—</div><div class="risk-bar"><div class="risk-bar-fill" id="w-dd-bar" style="width:0%"></div></div></div>
+  </div>
+</section>
+
+<!-- Per-symbol breakdown -->
+<section>
+  <h2>By Symbol</h2>
+  <table class="sym-table">
+    <thead><tr><th>Symbol</th><th>Trades</th><th>Win%</th><th>Total P&amp;L</th><th>Avg P&amp;L</th><th>Avg Hold</th></tr></thead>
+    <tbody id="sym-tbody"><tr><td colspan="6" class="empty">No closed trades yet</td></tr></tbody>
+  </table>
+</section>
+
+<!-- Open positions with live P&L -->
+<section>
+  <h2>Open Positions (live P&amp;L)</h2>
+  <table>
+    <thead><tr><th>Market</th><th>Side</th><th>Size</th><th>Entry</th><th>Current</th><th>Unreal P&amp;L</th><th>MFE</th><th>MAE</th><th>Frac</th></tr></thead>
+    <tbody id="open-tbody"><tr><td colspan="9" class="empty">No open positions</td></tr></tbody>
+  </table>
+</section>
+
+<!-- Trade Journal -->
+<section>
+  <h2>Trade Journal (last 50)</h2>
+  <table>
+    <thead><tr><th>Sym</th><th>Side</th><th>δ</th><th>EV</th><th>OurP</th><th>MktP</th><th>Whale</th><th>Depth</th><th>Slip</th><th>Size</th><th>Close</th><th>P&amp;L</th><th>Hold</th></tr></thead>
+    <tbody id="journal-tbody"><tr><td colspan="13" class="empty">No journal entries yet</td></tr></tbody>
+  </table>
+</section>
+
+<!-- Markets + Whale Activity (collapsible-ish) -->
+<section>
+  <h2>Live Markets</h2>
+  <table>
+    <thead><tr><th>Sym</th><th>Question</th><th>Implied P</th><th>Spread</th><th>Vol 24h</th><th>TTL</th><th>Elapsed</th></tr></thead>
+    <tbody id="markets-tbody"><tr><td colspan="7" class="empty">Loading…</td></tr></tbody>
+  </table>
+</section>
+
+<section>
+  <h2>Whale Activity (last 50)</h2>
+  <table>
+    <thead><tr><th>Market</th><th>Direction</th><th>Size USD</th><th>Price</th><th>Time</th></tr></thead>
+    <tbody id="whales-tbody"><tr><td colspan="5" class="empty">Loading…</td></tr></tbody>
+  </table>
+</section>
+
+<script>
+const $ = id => document.getElementById(id);
+const fmt = {
+  usd: v => `$${Number(v).toFixed(2)}`,
+  pct: v => `${(Number(v)*100).toFixed(1)}%`,
+  pnl: (v, full=false) => {
+    const n = Number(v);
+    const cls = n >= 0 ? 'pnl-pos' : 'pnl-neg';
+    const s = `${n>=0?'+':''}$${Math.abs(n).toFixed(2)}`;
+    return full ? `<span class="${cls}">${s}</span>` : s;
+  },
+  pnlClass: v => Number(v) >= 0 ? 'pos' : 'neg',
+  short: (s, n=40) => s && s.length > n ? s.slice(0,n)+'…' : s,
+  ts: t => new Date(t*1000).toLocaleTimeString(),
+  dur: s => {
+    s = Math.abs(s);
+    if (s < 60) return `${Math.floor(s)}s`;
+    if (s < 3600) return `${Math.floor(s/60)}m`;
+    if (s < 86400) return `${(s/3600).toFixed(1)}h`;
+    return `${(s/86400).toFixed(1)}d`;
+  },
+  streak: n => n === 0 ? '—' : n > 0 ? `+${n}W` : `${Math.abs(n)}L`,
+};
+
+async function fetchJSON(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`${url}: ${r.status}`);
+  return r.json();
+}
+
+function setError(msg) {
+  $('error-bar').textContent = msg;
+  $('error-bar').style.display = msg ? 'block' : 'none';
+}
+
+// Equity curve rendering
+function drawEquity(points) {
+  const canvas = $('equity-chart');
+  const ctx = canvas.getContext('2d');
+  canvas.width = canvas.offsetWidth || 600;
+  canvas.height = 140;
+  if (!points || points.length < 2) {
+    ctx.fillStyle = '#6e7681';
+    ctx.font = '12px monospace';
+    ctx.fillText('No equity data yet', 20, 75);
+    return;
+  }
+  const navs = points.map(p => p.nav);
+  const min = Math.min(...navs) * 0.998;
+  const max = Math.max(...navs) * 1.002;
+  const W = canvas.width, H = canvas.height;
+  const px = i => (i / (points.length - 1)) * W;
+  const py = v => H - ((v - min) / (max - min + 0.001)) * (H - 20) - 10;
+
+  ctx.clearRect(0, 0, W, H);
+
+  // Fill gradient
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  const isUp = navs[navs.length-1] >= navs[0];
+  grad.addColorStop(0, isUp ? 'rgba(63,185,80,0.25)' : 'rgba(248,81,73,0.25)');
+  grad.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.beginPath();
+  ctx.moveTo(px(0), py(navs[0]));
+  navs.forEach((v,i) => ctx.lineTo(px(i), py(v)));
+  ctx.lineTo(px(navs.length-1), H);
+  ctx.lineTo(0, H);
+  ctx.closePath();
+  ctx.fillStyle = grad;
+  ctx.fill();
+
+  // Line
+  ctx.beginPath();
+  ctx.strokeStyle = isUp ? '#3fb950' : '#f85149';
+  ctx.lineWidth = 1.5;
+  navs.forEach((v,i) => i === 0 ? ctx.moveTo(px(i), py(v)) : ctx.lineTo(px(i), py(v)));
+  ctx.stroke();
+
+  // Min/max labels
+  ctx.fillStyle = '#6e7681';
+  ctx.font = '10px monospace';
+  ctx.fillText('$'+max.toFixed(0), 4, 12);
+  ctx.fillText('$'+min.toFixed(0), 4, H-4);
+}
+
+async function refresh() {
+  try {
+    const [st, an, wallet, curve, journal, markets, whales, trades] = await Promise.all([
+      fetchJSON('/state'),
+      fetchJSON('/analytics'),
+      fetchJSON('/wallet'),
+      fetchJSON('/equity-curve'),
+      fetchJSON('/journal'),
+      fetchJSON('/live-markets'),
+      fetchJSON('/whale-activity'),
+      fetchJSON('/trades'),
+    ]);
+    setError('');
+
+    // Header
+    $('mode-badge').textContent = st.mode.toUpperCase();
+    $('mode-badge').className = st.mode;
+    $('last-update').textContent = 'Updated ' + new Date().toLocaleTimeString();
+
+    // Stat strip
+    const returnPct = an.total_return_pct || 0;
+    $('s-nav').textContent = fmt.usd(st.nav);
+    $('s-nav').className = 'value ' + (returnPct >= 0 ? 'pos' : 'neg');
+    $('s-return').textContent = `${returnPct>=0?'+':''}${returnPct.toFixed(2)}% total return`;
+    $('s-cash').textContent = fmt.usd(st.cash);
+    const rpnl = st.realized_pnl;
+    $('s-rpnl').innerHTML = fmt.pnl(rpnl, true);
+    $('s-rpnl').className = 'value ' + fmt.pnlClass(rpnl);
+    const upnl = st.unrealized_pnl;
+    $('s-upnl').innerHTML = fmt.pnl(upnl, true);
+    $('s-upnl').className = 'value ' + fmt.pnlClass(upnl);
+    $('s-open').textContent = st.open_positions;
+    $('s-wr').textContent = an.win_rate_pct ? an.win_rate_pct.toFixed(1)+'%' : '—';
+    $('s-wr').className = 'value ' + (an.win_rate_pct >= 52 ? 'pos' : 'neg');
+    $('s-sharpe').textContent = an.sharpe_ratio ? an.sharpe_ratio.toFixed(2) : '—';
+    $('s-sharpe').className = 'value ' + (an.sharpe_ratio >= 1 ? 'pos' : an.sharpe_ratio < 0 ? 'neg' : '');
+    $('s-mdd').textContent = an.max_drawdown_pct ? an.max_drawdown_pct.toFixed(1)+'%' : '—';
+    $('s-mdd').className = 'value ' + (an.max_drawdown_pct > 10 ? 'neg' : '');
+
+    // Analytics grid
+    $('a-pf').textContent = an.profit_factor ? an.profit_factor.toFixed(2) : '—';
+    $('a-pf').className = 'v ' + (an.profit_factor >= 1.5 ? 'pnl-pos' : 'pnl-neg');
+    $('a-exp').innerHTML = an.expectancy != null ? fmt.pnl(an.expectancy, true) : '—';
+    $('a-total').textContent = an.total_trades || '—';
+    $('a-hold').textContent = an.avg_hold_time_s ? fmt.dur(an.avg_hold_time_s) : '—';
+    const streak = an.current_streak || 0;
+    $('a-streak').textContent = fmt.streak(streak);
+    $('a-streak').className = 'v ' + (streak > 0 ? 'pnl-pos' : streak < 0 ? 'pnl-neg' : '');
+    $('a-slip').textContent = an.total_slippage != null ? fmt.usd(an.total_slippage) : '—';
+    $('a-fees').textContent = an.total_fees_paid != null ? fmt.usd(an.total_fees_paid) : '—';
+    $('a-cdd').textContent = an.current_drawdown_pct != null ? an.current_drawdown_pct.toFixed(1)+'%' : '—';
+    $('a-cdd').className = 'v ' + (an.current_drawdown_pct > 5 ? 'pnl-neg' : '');
+
+    // Close reasons
+    const reasons = an.closes_by_reason || {};
+    $('reason-bar').innerHTML = Object.entries(reasons).map(([r,c]) =>
+      `<span class="reason-chip">${r.replace(/_/g,' ')}: ${c}</span>`
+    ).join('') || '<span style="color:#6e7681;font-size:11px">No closed trades</span>';
+
+    // Wallet risk
+    if (wallet) {
+      $('w-closs').textContent = wallet.consecutive_losses || 0;
+      $('w-closs').className = 'v ' + (wallet.consecutive_losses >= 2 ? 'pnl-neg' : '');
+      const dailyLossPct = an.current_drawdown_pct || 0;
+      const dllLimit = wallet.daily_loss_limit_pct || 5;
+      $('w-dll').textContent = `${dailyLossPct.toFixed(1)}% / ${dllLimit.toFixed(0)}%`;
+      const dllFrac = Math.min(1, dailyLossPct / dllLimit);
+      const dllBar = $('w-dll-bar');
+      dllBar.style.width = (dllFrac*100)+'%';
+      dllBar.className = 'risk-bar-fill ' + (dllFrac > 0.8 ? 'risk-crit' : dllFrac > 0.5 ? 'risk-warn' : 'risk-ok');
+      const cd = wallet.cooldown_until;
+      $('w-cd').textContent = cd && cd > Date.now()/1000 ? fmt.dur(cd - Date.now()/1000) + ' left' : 'None';
+      $('w-cd').className = 'v ' + (cd && cd > Date.now()/1000 ? 'pnl-neg' : '');
+      const ddPct = wallet.drawdown_pct || 0;
+      $('w-dd').textContent = ddPct.toFixed(2)+'%';
+      const ddBar = $('w-dd-bar');
+      ddBar.style.width = Math.min(100, ddPct*5)+'%';
+      ddBar.className = 'risk-bar-fill ' + (ddPct > 10 ? 'risk-crit' : ddPct > 5 ? 'risk-warn' : 'risk-ok');
+    }
+
+    // Equity curve
+    drawEquity(curve);
+
+    // By-symbol
+    const bySymbol = an.by_symbol || {};
+    const symRows = Object.entries(bySymbol);
+    $('sym-tbody').innerHTML = symRows.length ? symRows.sort((a,b) => b[1].total_pnl - a[1].total_pnl).map(([sym, d]) =>
+      `<tr>
+        <td><strong>${sym}</strong></td>
+        <td>${d.total}</td>
+        <td class="${d.win_rate>=0.52?'pnl-pos':'pnl-neg'}">${(d.win_rate*100).toFixed(1)}%</td>
+        <td class="${d.total_pnl>=0?'pnl-pos':'pnl-neg'}">${d.total_pnl>=0?'+':''}$${Math.abs(d.total_pnl).toFixed(2)}</td>
+        <td class="${d.avg_pnl>=0?'pnl-pos':'pnl-neg'}">${d.avg_pnl>=0?'+':''}$${Math.abs(d.avg_pnl).toFixed(2)}</td>
+        <td>${fmt.dur(d.avg_hold_s)}</td>
+      </tr>`
+    ).join('') : '<tr><td colspan="6" class="empty">No closed trades yet</td></tr>';
+
+    // Open positions (live P&L)
+    const openTrades = trades.filter(t => t.status === 'OPEN');
+    $('open-tbody').innerHTML = openTrades.length ? openTrades.map(t =>
+      `<tr>
+        <td title="${t.condition_id}">${t.condition_id.slice(0,10)}…</td>
+        <td><span class="tag tag-${t.side.toLowerCase()}">${t.side}</span></td>
+        <td>${fmt.usd(t.size_usd)}</td>
+        <td>${fmt.pct(t.entry_price)}</td>
+        <td>${t.current_price != null ? fmt.pct(t.current_price) : '—'}</td>
+        <td class="${t.unrealized_pnl>=0?'pnl-pos':'pnl-neg'}">${t.unrealized_pnl!=null?(t.unrealized_pnl>=0?'+':'')+'$'+Math.abs(t.unrealized_pnl).toFixed(2):'—'}</td>
+        <td class="pnl-pos">${t.max_favorable_excursion!=null?'+$'+t.max_favorable_excursion.toFixed(2):'—'}</td>
+        <td class="pnl-neg">${t.max_adverse_excursion!=null?'$'+t.max_adverse_excursion.toFixed(2):'—'}</td>
+        <td>${t.fill_fraction!=null?(t.fill_fraction*100).toFixed(0)+'%':'100%'}</td>
+      </tr>`
+    ).join('') : '<tr><td colspan="9" class="empty">No open positions</td></tr>';
+
+    // Trade journal
+    $('journal-tbody').innerHTML = journal.length ? journal.map(j =>
+      `<tr>
+        <td>${j.crypto_symbol}</td>
+        <td><span class="tag tag-${j.side.toLowerCase()}">${j.side}</span></td>
+        <td class="${j.delta>=0?'pnl-pos':'pnl-neg'}">${(j.delta>=0?'+':'')}${(j.delta*100).toFixed(1)}%</td>
+        <td class="${j.ev_net>=0?'pnl-pos':'pnl-neg'}">${(j.ev_net*100).toFixed(1)}%</td>
+        <td>${fmt.pct(j.our_prob)}</td>
+        <td>${fmt.pct(j.market_prob)}</td>
+        <td>${(j.whale_score*100).toFixed(0)}%</td>
+        <td>${(j.depth_score*100).toFixed(0)}%</td>
+        <td class="pnl-neg">${(j.slippage*100).toFixed(2)}%</td>
+        <td>${fmt.usd(j.size_usd)}</td>
+        <td>${j.close_reason ? `<span class="tag tag-${j.close_reason}">${j.close_reason.replace(/_/g,' ')}</span>` : '<span style="color:#6e7681">open</span>'}</td>
+        <td>${j.pnl!=null ? `<span class="${j.pnl>=0?'pnl-pos':'pnl-neg'}">${j.pnl>=0?'+':''}$${Math.abs(j.pnl).toFixed(2)}</span>` : '—'}</td>
+        <td>${j.hold_time_s ? fmt.dur(j.hold_time_s) : '—'}</td>
+      </tr>`
+    ).join('') : '<tr><td colspan="13" class="empty">No journal entries yet</td></tr>';
+
+    // Markets
+    $('markets-tbody').innerHTML = markets.length ? markets.map(m =>
+      `<tr>
+        <td><strong>${m.crypto_symbol}</strong></td>
+        <td title="${m.question}">${fmt.short(m.question, 45)}</td>
+        <td>${fmt.pct(m.implied_prob)}</td>
+        <td>${fmt.pct(m.spread)}</td>
+        <td>${fmt.usd(m.volume_24h)}</td>
+        <td>${m.time_to_expiry_h}h</td>
+        <td>${fmt.pct(m.fraction_elapsed)}</td>
+      </tr>`
+    ).join('') : '<tr><td colspan="7" class="empty">No active markets</td></tr>';
+
+    // Whales
+    $('whales-tbody').innerHTML = whales.length ? whales.map(w =>
+      `<tr>
+        <td title="${w.condition_id}">${w.condition_id.slice(0,10)}…</td>
+        <td><span class="tag tag-${w.direction.toLowerCase()}">${w.direction}</span></td>
+        <td>${fmt.usd(w.size_usd)}</td>
+        <td>${fmt.pct(w.price)}</td>
+        <td>${fmt.ts(w.timestamp)}</td>
+      </tr>`
+    ).join('') : '<tr><td colspan="5" class="empty">No whale events yet</td></tr>';
+
+  } catch (err) {
+    setError('API error: ' + err.message);
+  }
+}
+
+refresh();
+setInterval(refresh, 10_000);
+window.addEventListener('resize', () => {
+  fetchJSON('/equity-curve').then(drawEquity).catch(()=>{});
+});
+</script>
+</body>
+</html>
