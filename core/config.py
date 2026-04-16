@@ -55,6 +55,23 @@ class AppConfig:
     llm_min_whale_score: float = 0.5
     llm_cache_ttl_s: float = 600.0
 
+    # LLM market ranker (pre-filter attractiveness scorer)
+    ranker_enabled: bool = False
+    ranker_model: str = "minimax/minimax-01"
+    ranker_min_score: float = 0.5
+    ranker_cache_ttl_s: float = 900.0
+    ranker_timeout_s: float = 3.0
+    ranker_max_per_scan: int = 30
+
+    # Market snapshot logger (for backtest replay)
+    snapshot_logging_enabled: bool = True
+    snapshot_min_interval_s: float = 60.0
+
+    # Realized volatility provider (feeds Black-Scholes probability)
+    vol_kline_interval: str = "1h"
+    vol_kline_count: int = 24
+    vol_cache_ttl_s: float = 600.0
+
     # Orderbook
     orderbook_manipulation_threshold: float = 0.60
 
@@ -135,6 +152,17 @@ def load_config(config_path: Optional[str] = None) -> AppConfig:
         llm_validation_enabled=raw.get("llm_validation_enabled", AppConfig.llm_validation_enabled),
         llm_min_whale_score=raw.get("llm_min_whale_score", AppConfig.llm_min_whale_score),
         llm_cache_ttl_s=raw.get("llm_cache_ttl_s", AppConfig.llm_cache_ttl_s),
+        ranker_enabled=raw.get("ranker_enabled", AppConfig.ranker_enabled),
+        ranker_model=raw.get("ranker_model", AppConfig.ranker_model),
+        ranker_min_score=raw.get("ranker_min_score", AppConfig.ranker_min_score),
+        ranker_cache_ttl_s=raw.get("ranker_cache_ttl_s", AppConfig.ranker_cache_ttl_s),
+        ranker_timeout_s=raw.get("ranker_timeout_s", AppConfig.ranker_timeout_s),
+        ranker_max_per_scan=raw.get("ranker_max_per_scan", AppConfig.ranker_max_per_scan),
+        snapshot_logging_enabled=raw.get("snapshot_logging_enabled", AppConfig.snapshot_logging_enabled),
+        snapshot_min_interval_s=raw.get("snapshot_min_interval_s", AppConfig.snapshot_min_interval_s),
+        vol_kline_interval=raw.get("vol_kline_interval", AppConfig.vol_kline_interval),
+        vol_kline_count=raw.get("vol_kline_count", AppConfig.vol_kline_count),
+        vol_cache_ttl_s=raw.get("vol_cache_ttl_s", AppConfig.vol_cache_ttl_s),
         orderbook_manipulation_threshold=raw.get(
             "orderbook_manipulation_threshold", AppConfig.orderbook_manipulation_threshold
         ),

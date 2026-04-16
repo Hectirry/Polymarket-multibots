@@ -29,6 +29,7 @@ import argparse
 import asyncio
 import logging
 import time
+from typing import Optional
 
 import uvicorn
 
@@ -38,8 +39,10 @@ from core import database
 from core.config import load_config
 from dashboard import api_server
 from engine.llm_validator import LLMValidator
+from engine.market_ranker import MarketRanker, RankResult
 from engine.orderbook_analyzer import MockOrderbookAnalyzer, OrderbookAnalyzer
 from engine.signal_router import SignalRouter
+from engine.volatility import VolatilityProvider
 from execution.order_executor import PaperOrderExecutor, create_executor
 from execution.paper_wallet import PaperWallet
 from execution.position_manager import PositionManager
@@ -130,6 +133,9 @@ async def run(args: argparse.Namespace) -> None:
     # ── Paper wallet + engine ─────────────────────────────────────────────────
     wallet = PaperWallet(cfg.bankroll_usd, cfg)
     llm_validator = LLMValidator(cfg) if cfg.llm_validation_enabled else None
+    market_ranker = MarketRanker(cfg) if cfg.ranker_enabled else None
+    vol_provider = VolatilityProvider(cfg)
+    await vol_provider.start()
     router = SignalRouter(
         cfg=cfg,
         orderbook_analyzer=ob_analyzer,
@@ -153,6 +159,8 @@ async def run(args: argparse.Namespace) -> None:
         whale_detector=whale_detector,
         position_manager=position_manager,
         wallet=wallet,
+        market_ranker=market_ranker,
+        vol_provider=vol_provider,
     )
 
     dashboard_config = uvicorn.Config(
@@ -176,24 +184,121 @@ async def run(args: argparse.Namespace) -> None:
 
     last_recalib = time.time()
     recalib_interval = 300
+    # cid → (last_ts, last_verdict_stage). A new row is written when either
+    # `snapshot_min_interval_s` has elapsed OR the verdict stage changed.
+    snapshot_last_logged: dict[str, tuple[float, str]] = {}
+
+    async def _log_snapshot(
+        market, price, whale, decision, rank: Optional[RankResult]
+    ) -> None:
+        if not cfg.snapshot_logging_enabled:
+            return
+        now = time.time()
+        current_key = (
+            "accepted" if decision.accepted
+            else f"rejected:{decision.stage}"
+        )
+        prev = snapshot_last_logged.get(market.condition_id)
+        if prev is not None:
+            prev_ts, prev_key = prev
+            verdict_flipped = current_key != prev_key
+            if (not verdict_flipped
+                    and (now - prev_ts) < cfg.snapshot_min_interval_s):
+                return
+        snapshot_last_logged[market.condition_id] = (now, current_key)
+        whale_score = whale.pressure_score if whale else 0.0
+        whale_count = whale.trade_count if whale else 0
+        try:
+            await database.insert_market_snapshot(
+                timestamp=now,
+                condition_id=market.condition_id,
+                token_id=market.token_id,
+                question=market.question,
+                crypto_symbol=market.crypto_symbol,
+                binance_price=(price.price if price else None),
+                market_implied_prob=market.implied_prob,
+                best_bid=market.best_bid,
+                best_ask=market.best_ask,
+                spread=market.spread,
+                volume_24h=market.volume_24h,
+                open_interest=market.open_interest,
+                time_to_expiry_s=market.time_to_expiry_s,
+                whale_score=whale_score,
+                whale_count=whale_count,
+                ranker_score=(rank.score if rank else None),
+                ranker_reason=(rank.reason if rank else ""),
+                verdict=("accepted" if decision.accepted else "rejected"),
+                reject_stage=decision.stage,
+                reject_reason=decision.reason,
+                signal_delta=decision.delta,
+                ev_net=decision.ev_net,
+            )
+        except Exception as exc:
+            logging.getLogger("main").warning("snapshot log failed: %s", exc)
 
     async def market_evaluation_loop() -> None:
         nonlocal last_recalib
+        from engine import probability
+        from engine.signal_router import RouterDecision
         while True:
             try:
                 markets = market_feed.get_active_markets()
+                ranker_api_calls_this_scan = 0
+
                 for market in markets:
                     price = binance_feed.get_price(market.crypto_symbol)
                     whale = whale_detector.get_signal(market.condition_id)
 
+                    # Pull realized volatility (cached per symbol ~10 min) so the
+                    # probability engine can use Black-Scholes instead of the
+                    # time-independent logistic. Falls back to None on failure,
+                    # in which case probability.estimate uses the legacy path.
+                    sigma = await vol_provider.get(market.crypto_symbol)
+
+                    # Pre-compute probability estimate once so both the ranker
+                    # and the router see the same numbers.
+                    prob_est = probability.estimate(
+                        market, price, whale, volatility=sigma,
+                    )
+
+                    # ── Market ranker pre-filter (optional) ─────────────────
+                    rank_result: Optional[RankResult] = None
+                    if market_ranker is not None:
+                        over_budget = ranker_api_calls_this_scan >= cfg.ranker_max_per_scan
+                        if not over_budget:
+                            rank_result = await market_ranker.rank(
+                                market, price, whale, prob_est=prob_est,
+                            )
+                            # Only real HTTP calls consume the scan budget.
+                            # Cache hits and skipped calls are free.
+                            if not rank_result.from_cache and not rank_result.skipped:
+                                ranker_api_calls_this_scan += 1
+                        if (rank_result is not None
+                                and rank_result.score is not None
+                                and rank_result.score < cfg.ranker_min_score):
+                            await _log_snapshot(
+                                market, price, whale,
+                                RouterDecision(
+                                    signal=None,
+                                    stage="ranker",
+                                    reason=f"score={rank_result.score:.2f} < {cfg.ranker_min_score:.2f}: {rank_result.reason}",
+                                ),
+                                rank_result,
+                            )
+                            continue
+
                     setup_wr, setup_n = await backtest_runner.get_setup_stats(
                         market.condition_id, market.crypto_symbol
                     )
-                    signal = await router.evaluate(
+                    decision = await router.evaluate_full(
                         market, price, whale,
                         setup_win_rate=setup_wr,
                         setup_sample_count=setup_n or 0,
+                        prob_est=prob_est,
                     )
+
+                    await _log_snapshot(market, price, whale, decision, rank_result)
+                    signal = decision.signal
 
                     if signal is None:
                         continue
@@ -268,6 +373,7 @@ async def run(args: argparse.Namespace) -> None:
         await market_feed.stop()
         await whale_detector.stop()
         await position_manager.stop()
+        await vol_provider.stop()
         await database.close_db()
         logger.info("Shutdown complete. Final NAV: $%.2f", wallet.nav())
 

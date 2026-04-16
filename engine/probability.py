@@ -2,22 +2,25 @@
 engine/probability.py — Core probability estimation engine.
 
 Combines three signals:
-  1. Binance spot price vs. market's implied strike to estimate binance_implied_prob.
+  1. Binance spot price + realized volatility → Black-Scholes P(S_T > K).
+     If volatility is unknown, falls back to a fixed-steepness logistic.
   2. Polymarket's own market_implied_prob (best_bid of YES token).
   3. Optional whale adjustment (±0.05) when a WhaleSignal is present.
 
-The resulting delta drives signal generation; timing adjustments are applied
-separately by signal_router using engine/timing.py.
+The Black-Scholes path scales correctly with time-to-expiry: a 1% move 12h
+from expiry is meaningful, the same move 30 days from expiry is noise.
+The old logistic treated all horizons identically and systematically
+underweighted short-dated markets — that's why edges looked flat.
 
-Strike extraction heuristic:
-  We parse the market question text for a price threshold (e.g. "$70,000" or "70k").
-  If no strike is found we fall back to treating the question purely on the market's
-  implied probability and use a neutral 0.50 as our estimate (no edge asserted).
+Strike extraction:
+  We parse the market question text for a price threshold (e.g. "$70,000").
+  Without a strike we treat the market as neutral (our_prob = market_prob).
 """
 
 from __future__ import annotations
 
 import logging
+import math
 import re
 from dataclasses import dataclass
 from typing import Optional
@@ -26,41 +29,57 @@ from core.models import MarketSnapshot, PriceSnapshot, Side, WhaleSignal
 
 logger = logging.getLogger(__name__)
 
-_PRICE_PATTERN = re.compile(
-    r"\$?([\d,]+(?:\.\d+)?)\s*[kK]?\b"
-)
+_SECONDS_PER_YEAR = 365.25 * 24 * 3600
+_LEGACY_LOGISTIC_K = 8.0
 
 
 def _parse_strike(question: str) -> Optional[float]:
     """Extract the first numeric price target from a question string."""
-    # Try explicit dollar amounts with commas / k suffix
     matches = re.findall(r"\$([\d,]+(?:\.\d+)?)\s*([kK]?)", question)
     for num_str, suffix in matches:
         try:
             val = float(num_str.replace(",", ""))
             if suffix.lower() == "k":
                 val *= 1000
-            if val > 1:   # ignore noise like "$1"
+            if val > 1:
                 return val
         except ValueError:
             continue
     return None
 
 
-def _spot_to_implied_prob(spot_price: float, strike: float) -> float:
-    """
-    Heuristic: model P(spot > strike at expiry) using a logistic function.
+def _norm_cdf(x: float) -> float:
+    """Standard normal CDF via erf."""
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
 
-    This is intentionally simple — we're not pricing options, just getting a
-    directional signal.  The steepness parameter σ represents uncertainty.
+
+def _bs_prob_above_strike(
+    spot: float, strike: float, sigma_annual: float, time_to_expiry_s: float,
+) -> float:
     """
+    P(S_T > K) under GBM with no drift:
+        d2 = (ln(S/K) - 0.5 σ² T) / (σ √T)
+        P  = N(d2)
+
+    Returns 0.5 on degenerate inputs so the caller degrades to the market's
+    own implied probability rather than producing a fake extreme.
+    """
+    if spot <= 0 or strike <= 0 or sigma_annual <= 0 or time_to_expiry_s <= 0:
+        return 0.5
+    T = time_to_expiry_s / _SECONDS_PER_YEAR
+    sigma_sqrt_T = sigma_annual * math.sqrt(T)
+    if sigma_sqrt_T <= 1e-9:
+        return 1.0 if spot > strike else (0.0 if spot < strike else 0.5)
+    d2 = (math.log(spot / strike) - 0.5 * sigma_annual ** 2 * T) / sigma_sqrt_T
+    return max(0.005, min(0.995, _norm_cdf(d2)))
+
+
+def _logistic_prob_above_strike(spot: float, strike: float) -> float:
+    """Legacy logistic fallback — time-independent, kept for backward-compat."""
     if strike <= 0:
         return 0.5
-    ratio = spot_price / strike
-    # Logistic: 1 / (1 + exp(-k * (ratio - 1)))
-    k = 8.0   # controls sharpness; 8 = "50% at-the-money, tails ≈0/1 when ±30%"
-    import math
-    return 1.0 / (1.0 + math.exp(-k * (ratio - 1.0)))
+    ratio = spot / strike
+    return 1.0 / (1.0 + math.exp(-_LEGACY_LOGISTIC_K * (ratio - 1.0)))
 
 
 @dataclass
@@ -72,15 +91,23 @@ class ProbabilityEstimate:
     our_prob: float                 # final probability we act on
     strike: Optional[float]         # price threshold parsed from question
     whale_adjusted: bool
+    using_bs: bool = False          # True when BS was used (vol available)
+    sigma_annual: Optional[float] = None   # volatility used (if any)
 
 
 def estimate(
     market: MarketSnapshot,
     price: Optional[PriceSnapshot],
     whale: Optional[WhaleSignal] = None,
+    volatility: Optional[float] = None,
 ) -> ProbabilityEstimate:
     """
     Compute ProbabilityEstimate for a market + current spot price.
+
+    When `volatility` (annualized sigma) is supplied, we use Black-Scholes
+    P(S_T > K) scaled by the market's time-to-expiry — the correct way to
+    compare a 12h market against a 30-day market. When volatility is None,
+    we fall back to the legacy time-independent logistic.
 
     If spot price is unavailable or strike cannot be parsed, returns a
     neutral estimate (our_prob == market_prob, delta == 0).
@@ -101,9 +128,17 @@ def estimate(
             our_prob=market_implied_prob,
             strike=strike,
             whale_adjusted=False,
+            using_bs=False,
+            sigma_annual=None,
         )
 
-    binance_prob = _spot_to_implied_prob(price.price, strike)
+    using_bs = volatility is not None and volatility > 0 and market.time_to_expiry_s > 0
+    if using_bs:
+        binance_prob = _bs_prob_above_strike(
+            price.price, strike, volatility, market.time_to_expiry_s,
+        )
+    else:
+        binance_prob = _logistic_prob_above_strike(price.price, strike)
     raw_delta = binance_prob - market_implied_prob
 
     # Whale adjustment: ±0.05 in whale's direction
@@ -136,4 +171,6 @@ def estimate(
         our_prob=our_prob,
         strike=strike,
         whale_adjusted=whale_adjusted,
+        using_bs=using_bs,
+        sigma_annual=volatility if using_bs else None,
     )

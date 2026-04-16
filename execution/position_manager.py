@@ -251,7 +251,26 @@ class PositionManager:
     # ── DB reload on restart ──────────────────────────────────────────────────
 
     async def _reload_open_trades(self) -> None:
+        # ── Reconstruct wallet from closed trades ────────────────────────
+        # On restart the wallet starts with initial_bankroll.  Subtract the
+        # realised PnL of already-closed trades so cash reflects reality.
+        closed_rows = await database.get_all_trades(limit=50_000)
+        realized_pnl = sum(
+            float(r["pnl"]) for r in closed_rows if r["status"] == "CLOSED"
+        )
+        if realized_pnl != 0.0:
+            # Adjust cash: initial_bankroll + realized_pnl = true available
+            self._wallet._cash = self._wallet._initial + realized_pnl
+            self._wallet._realized_pnl = realized_pnl
+            self._wallet._peak_nav = max(self._wallet._peak_nav, self._wallet._cash)
+            logger.info(
+                "Wallet reconstructed from DB: cash=$%.2f (realized_pnl=$%.2f)",
+                self._wallet._cash, realized_pnl,
+            )
+
+        # ── Reload open positions and deduct their capital ───────────────
         rows = await database.get_open_trades()
+        journal = await database.get_journal(limit=5_000) if rows else []
         for row in rows:
             trade = Trade(
                 id=row["id"],
@@ -269,12 +288,19 @@ class PositionManager:
             )
             self._open_trades[trade.id] = trade
             self._router.mark_position_open(trade.condition_id)
-            # We don't know symbol on restart — use journal lookup
-            journal = await database.get_journal(limit=5_000)
+
+            # Deduct position capital so credit() on close is balanced
+            symbol = "UNKNOWN"
             for j in journal:
                 if j["trade_id"] == trade.id:
-                    self._trade_symbol[trade.id] = j["crypto_symbol"]
+                    symbol = j["crypto_symbol"]
                     break
+            self._trade_symbol[trade.id] = symbol
+            self._wallet.deduct(symbol, trade.size_usd)
+            logger.info(
+                "Reloaded open trade %s (%s) size=$%.2f — wallet cash=$%.2f",
+                trade.id[:8], symbol, trade.size_usd, self._wallet.cash,
+            )
 
     async def _fetch_market(self, condition_id: str) -> Optional[dict]:
         if self._session is None:

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import time
+from dataclasses import dataclass
 from typing import Optional
 
 from core.config import AppConfig
@@ -28,6 +29,22 @@ from engine import ev_calculator, probability, timing
 from engine.llm_validator import LLMValidator
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class RouterDecision:
+    """Full verdict from the router — structured so the snapshot logger
+    can persist *why* a market was rejected, not just that it was."""
+
+    signal: Optional[Signal]
+    stage: str = ""          # '' on accept, else: liquidity/timing/orderbook/...
+    reason: str = ""         # human-readable detail
+    delta: Optional[float] = None
+    ev_net: Optional[float] = None
+
+    @property
+    def accepted(self) -> bool:
+        return self.signal is not None
 
 
 class SignalRouter:
@@ -63,88 +80,101 @@ class SignalRouter:
         setup_win_rate: Optional[float] = None,
         setup_sample_count: int = 0,
     ) -> Optional[Signal]:
+        """Thin back-compat wrapper around evaluate_full() returning just the Signal."""
+        decision = await self.evaluate_full(
+            market, price, whale, setup_win_rate, setup_sample_count
+        )
+        return decision.signal
+
+    async def evaluate_full(
+        self,
+        market: MarketSnapshot,
+        price: Optional[PriceSnapshot],
+        whale: Optional[WhaleSignal] = None,
+        setup_win_rate: Optional[float] = None,
+        setup_sample_count: int = 0,
+        prob_est=None,
+    ) -> RouterDecision:
         """
-        Run the pipeline. Returns a Signal on success, None on any veto.
+        Run the pipeline and return a full decision (signal + reject stage/reason).
         All rejections are logged at INFO so operators can audit decisions.
         """
         cid = market.condition_id
         sym = market.crypto_symbol
 
+        def reject(stage: str, reason: str, delta: Optional[float] = None,
+                   ev: Optional[float] = None) -> RouterDecision:
+            logger.info("REJECT %s — [%s] %s", cid, stage, reason)
+            return RouterDecision(signal=None, stage=stage, reason=reason,
+                                  delta=delta, ev_net=ev)
+
         # ── 1. Liquidity filter ───────────────────────────────────────────────
         min_vol = self._cfg.get_for_symbol(sym, "min_volume_24h")
         if market.volume_24h < min_vol:
-            logger.info("REJECT %s — volume_24h %.0f < %.0f", cid, market.volume_24h, min_vol)
-            return None
+            return reject("liquidity", f"volume_24h {market.volume_24h:.0f} < {min_vol:.0f}")
         if market.open_interest < self._cfg.min_open_interest:
-            logger.info("REJECT %s — open_interest %.0f < %.0f", cid, market.open_interest, self._cfg.min_open_interest)
-            return None
+            return reject("liquidity", f"open_interest {market.open_interest:.0f} < {self._cfg.min_open_interest:.0f}")
         if market.spread > self._cfg.max_spread:
-            logger.info("REJECT %s — spread %.4f > %.4f", cid, market.spread, self._cfg.max_spread)
-            return None
+            return reject("liquidity", f"spread {market.spread:.4f} > {self._cfg.max_spread:.4f}")
 
         # ── 2. Timing filter ─────────────────────────────────────────────────
         min_ttl = self._cfg.get_for_symbol(sym, "min_time_remaining_s")
-        max_ttl = self._cfg.max_time_remaining_s
+        max_ttl = self._cfg.get_for_symbol(sym, "max_time_remaining_s")
         if not (min_ttl <= market.time_to_expiry_s <= max_ttl):
-            logger.info("REJECT %s — TTL %.0fs out of [%.0f, %.0f]",
-                        cid, market.time_to_expiry_s, min_ttl, max_ttl)
-            return None
+            return reject("timing",
+                          f"TTL {market.time_to_expiry_s:.0f}s out of [{min_ttl:.0f}, {max_ttl:.0f}]")
 
         # ── 3. Orderbook manipulation check ──────────────────────────────────
         ob = await self._ob_analyzer.analyze(market.token_id)
         if ob.is_manipulated:
-            logger.info(
-                "REJECT %s — orderbook manipulated (top3_conc=%.2f > %.2f)",
-                cid, ob.top3_concentration, self._cfg.orderbook_manipulation_threshold,
+            return reject(
+                "orderbook",
+                f"manipulated top3_conc={ob.top3_concentration:.2f} > {self._cfg.orderbook_manipulation_threshold:.2f}",
             )
-            return None
 
         # ── 4. Probability engine ─────────────────────────────────────────────
-        prob_est = probability.estimate(market, price, whale)
+        if prob_est is None:
+            prob_est = probability.estimate(market, price, whale)
         min_delta = self._cfg.get_for_symbol(sym, "min_delta")
         adj_delta = prob_est.adjusted_delta
 
-        # Determine trade direction
         if adj_delta >= min_delta:
             side = Side.YES
-            entry_price = market.best_ask   # buying YES → pay ask
+            entry_price = market.best_ask
         elif adj_delta <= -min_delta:
             side = Side.NO
-            entry_price = 1.0 - market.best_bid   # buying NO ≡ selling YES at bid
+            entry_price = 1.0 - market.best_bid
         else:
-            logger.info(
-                "REJECT %s — |delta|=%.4f < %.4f (binance_p=%.3f market_p=%.3f)",
-                cid, abs(adj_delta), min_delta,
-                prob_est.binance_implied_prob, prob_est.market_implied_prob,
+            return reject(
+                "probability",
+                f"|delta|={abs(adj_delta):.4f} < {min_delta:.4f} "
+                f"(binance_p={prob_est.binance_implied_prob:.3f} market_p={prob_est.market_implied_prob:.3f})",
+                delta=adj_delta,
             )
-            return None
 
         # ── 5. EV filter ──────────────────────────────────────────────────────
         ev_result = ev_calculator.calculate_ev(prob_est.our_prob, entry_price)
         min_ev = self._cfg.get_for_symbol(sym, "min_ev_threshold")
         if ev_result.ev_net_fees < min_ev:
-            logger.info(
-                "REJECT %s — ev_net=%.4f < %.4f",
-                cid, ev_result.ev_net_fees, min_ev,
-            )
-            return None
+            return reject("ev", f"ev_net={ev_result.ev_net_fees:.4f} < {min_ev:.4f}",
+                          delta=adj_delta, ev=ev_result.ev_net_fees)
 
         # ── 6. Price bounds ───────────────────────────────────────────────────
         if not (self._cfg.min_contract_price <= entry_price <= self._cfg.max_contract_price):
-            logger.info(
-                "REJECT %s — entry_price=%.4f out of [%.2f, %.2f]",
-                cid, entry_price, self._cfg.min_contract_price, self._cfg.max_contract_price,
+            return reject(
+                "price_bounds",
+                f"entry_price={entry_price:.4f} out of [{self._cfg.min_contract_price:.2f}, {self._cfg.max_contract_price:.2f}]",
+                delta=adj_delta, ev=ev_result.ev_net_fees,
             )
-            return None
 
         # ── 7. Setup quality gate ─────────────────────────────────────────────
         if self._cfg.setup_quality_gate_enabled and setup_sample_count >= self._cfg.setup_quality_min_sample:
             if setup_win_rate is not None and setup_win_rate < self._cfg.setup_quality_min_wr:
-                logger.info(
-                    "REJECT %s — historical WR=%.2f < %.2f (n=%d)",
-                    cid, setup_win_rate, self._cfg.setup_quality_min_wr, setup_sample_count,
+                return reject(
+                    "setup_quality",
+                    f"historical WR={setup_win_rate:.2f} < {self._cfg.setup_quality_min_wr:.2f} (n={setup_sample_count})",
+                    delta=adj_delta, ev=ev_result.ev_net_fees,
                 )
-                return None
 
         # ── 8. LLM validator (optional) ───────────────────────────────────────
         whale_score = whale.pressure_score if whale else 0.0
@@ -175,19 +205,19 @@ class SignalRouter:
             llm_validated = llm_result.validated
             llm_reason = llm_result.reason
             if not llm_validated:
-                logger.info("REJECT %s — LLM rejected: %s", cid, llm_reason)
-                return None
+                return reject("llm", f"LLM rejected: {llm_reason}",
+                              delta=adj_delta, ev=ev_result.ev_net_fees)
 
         # ── 9. Deduplication ──────────────────────────────────────────────────
         if cid in self._open_positions:
-            logger.info("REJECT %s — position already open", cid)
-            return None
+            return reject("dedup", "position already open",
+                          delta=adj_delta, ev=ev_result.ev_net_fees)
 
         # ── Timing adjustments ────────────────────────────────────────────────
         timing_adj = timing.compute_timing_adjustment(market, adj_delta)
         if not timing_adj.allow_entry:
-            logger.info("REJECT %s — timing: %s", cid, timing_adj.reason)
-            return None
+            return reject("timing_adj", timing_adj.reason,
+                          delta=adj_delta, ev=ev_result.ev_net_fees)
 
         # ── Size calculation ──────────────────────────────────────────────────
         size_usd = ev_calculator.kelly_size(
@@ -200,8 +230,8 @@ class SignalRouter:
         size_usd *= timing_adj.size_multiplier
 
         if size_usd < 1.0:
-            logger.info("REJECT %s — size too small ($%.2f)", cid, size_usd)
-            return None
+            return reject("size", f"size too small (${size_usd:.2f})",
+                          delta=adj_delta, ev=ev_result.ev_net_fees)
 
         logger.info(
             "SIGNAL %s %s: entry=%.4f size=$%.2f delta=%+.4f ev=%.4f "
@@ -209,7 +239,7 @@ class SignalRouter:
             sym, cid, entry_price, size_usd, adj_delta,
             ev_result.ev_net_fees, ob.depth_score, llm_validated,
         )
-        return Signal(
+        signal = Signal(
             condition_id=cid,
             crypto_symbol=sym,
             question=market.question,
@@ -228,3 +258,5 @@ class SignalRouter:
             effective_spread=ob.effective_spread,
             timestamp=time.time(),
         )
+        return RouterDecision(signal=signal, stage="", reason="accepted",
+                              delta=adj_delta, ev_net=ev_result.ev_net_fees)

@@ -124,6 +124,37 @@ async def _create_schema(db: aiosqlite.Connection) -> None:
             open_positions          INTEGER NOT NULL DEFAULT 0
         );
 
+        CREATE TABLE IF NOT EXISTS market_snapshots (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp           REAL NOT NULL,
+            condition_id        TEXT NOT NULL,
+            token_id            TEXT NOT NULL DEFAULT '',
+            question            TEXT NOT NULL DEFAULT '',
+            crypto_symbol       TEXT NOT NULL DEFAULT '',
+            binance_price       REAL,
+            market_implied_prob REAL NOT NULL DEFAULT 0.0,
+            best_bid            REAL NOT NULL DEFAULT 0.0,
+            best_ask            REAL NOT NULL DEFAULT 0.0,
+            spread              REAL NOT NULL DEFAULT 0.0,
+            volume_24h          REAL NOT NULL DEFAULT 0.0,
+            open_interest       REAL NOT NULL DEFAULT 0.0,
+            time_to_expiry_s    REAL NOT NULL DEFAULT 0.0,
+            whale_score         REAL NOT NULL DEFAULT 0.0,
+            whale_count         INTEGER NOT NULL DEFAULT 0,
+            ranker_score        REAL,
+            ranker_reason       TEXT NOT NULL DEFAULT '',
+            verdict             TEXT NOT NULL,
+            reject_stage        TEXT NOT NULL DEFAULT '',
+            reject_reason       TEXT NOT NULL DEFAULT '',
+            signal_delta        REAL,
+            ev_net              REAL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_mkt_snap_cid_ts
+            ON market_snapshots(condition_id, timestamp);
+        CREATE INDEX IF NOT EXISTS idx_mkt_snap_verdict_ts
+            ON market_snapshots(verdict, timestamp);
+
         CREATE TABLE IF NOT EXISTS trade_journal (
             trade_id            TEXT PRIMARY KEY,
             condition_id        TEXT NOT NULL,
@@ -439,6 +470,62 @@ async def get_journal(limit: int = 100) -> list[aiosqlite.Row]:
             "SELECT * FROM trade_journal ORDER BY open_ts DESC LIMIT ?", (limit,)
         )
         return await cursor.fetchall()
+
+
+async def insert_market_snapshot(
+    timestamp: float,
+    condition_id: str,
+    token_id: str,
+    question: str,
+    crypto_symbol: str,
+    binance_price: Optional[float],
+    market_implied_prob: float,
+    best_bid: float,
+    best_ask: float,
+    spread: float,
+    volume_24h: float,
+    open_interest: float,
+    time_to_expiry_s: float,
+    whale_score: float,
+    whale_count: int,
+    ranker_score: Optional[float],
+    ranker_reason: str,
+    verdict: str,
+    reject_stage: str,
+    reject_reason: str,
+    signal_delta: Optional[float],
+    ev_net: Optional[float],
+) -> None:
+    async with get_db() as db:
+        await db.execute(
+            """INSERT INTO market_snapshots
+               (timestamp, condition_id, token_id, question, crypto_symbol,
+                binance_price, market_implied_prob, best_bid, best_ask, spread,
+                volume_24h, open_interest, time_to_expiry_s,
+                whale_score, whale_count, ranker_score, ranker_reason,
+                verdict, reject_stage, reject_reason, signal_delta, ev_net)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (timestamp, condition_id, token_id, question, crypto_symbol,
+             binance_price, market_implied_prob, best_bid, best_ask, spread,
+             volume_24h, open_interest, time_to_expiry_s,
+             whale_score, whale_count, ranker_score, ranker_reason,
+             verdict, reject_stage, reject_reason, signal_delta, ev_net),
+        )
+        await db.commit()
+
+
+async def get_snapshot_stats(since_ts: float) -> dict[str, Any]:
+    async with get_db() as db:
+        cursor = await db.execute(
+            """SELECT verdict, reject_stage, COUNT(*) as n
+               FROM market_snapshots
+               WHERE timestamp >= ?
+               GROUP BY verdict, reject_stage
+               ORDER BY n DESC""",
+            (since_ts,),
+        )
+        rows = await cursor.fetchall()
+    return {"buckets": [dict(r) for r in rows]}
 
 
 async def get_pnl_series() -> list[float]:

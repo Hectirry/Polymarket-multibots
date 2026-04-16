@@ -1,0 +1,23 @@
+market:
+  slug_contains:
+    - "bitcoin-above-"
+    - "ethereum-above-"
+    - "bitcoin-up-or-down"
+    - "ethereum-up-or-down"
+  min_volume_24h: 5000
+  max_time_to_close_s: 172800  # 48h — daily close markets are the shortest live right now
+
+strategy:
+  name: stink_bid
+  discount_pct: 0.30
+  min_spread: 0.05
+  min_big_bids: 2
+  big_bid_usd: 50
+  bet_size_usd: 5
+  max_exposure_usd: 50
+
+bot:
+  poll_interval_s: 3
+  log_dir: logs
+  db_path: buzzer.db
+  log_level: INFO

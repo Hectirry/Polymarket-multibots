@@ -67,6 +67,47 @@
     /* Close reasons donut (simple bar) */
     .reason-bar { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 6px; }
     .reason-chip { font-size: 10px; padding: 2px 7px; border-radius: 10px; background: #21262d; color: #8b949e; }
+
+    /* Decision funnel */
+    .funnel { display: flex; align-items: stretch; gap: 2px; height: 42px; margin-top: 4px; }
+    .funnel-stage { flex: 1; display: flex; flex-direction: column; justify-content: center; align-items: center;
+                    padding: 4px 6px; border-radius: 3px; font-size: 11px; position: relative; }
+    .funnel-stage .fs-n { font-size: 18px; font-weight: bold; line-height: 1; }
+    .funnel-stage .fs-l { font-size: 9px; color: #c9d1d9; opacity: 0.75; text-transform: uppercase; letter-spacing: 0.5px; margin-top: 2px; }
+    .fs-raw        { background: #1f2937; color: #9ca3af; }
+    .fs-evaluated  { background: #1e3a5f; color: #93c5fd; }
+    .fs-ranker-out { background: #3d1e1a; color: #f87171; }
+    .fs-router-out { background: #3d2a1a; color: #fbbf24; }
+    .fs-accepted   { background: #1a3a1a; color: #34d399; }
+    .fs-traded     { background: #2d3a1a; color: #a3e635; }
+    .funnel-arrow { align-self: center; color: #484f58; font-size: 14px; }
+
+    /* Ranker score distribution */
+    .rank-dist { display: flex; gap: 3px; height: 22px; margin-top: 4px; border-radius: 3px; overflow: hidden; background: #0d1117; }
+    .rank-dist-seg { display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: bold; min-width: 0; }
+    .rd-strong    { background: #14532d; color: #86efac; }
+    .rd-tradeable { background: #1e4d3a; color: #6ee7b7; }
+    .rd-weak      { background: #4d3a10; color: #fcd34d; }
+    .rd-skip      { background: #4d1a1a; color: #fca5a5; }
+    .rd-noscore   { background: #262626; color: #737373; }
+
+    /* Rejections feed */
+    .rej-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+    .rej-table td { padding: 4px 6px; font-size: 11px; border-bottom: 1px solid #21262d; vertical-align: top; white-space: normal; overflow: hidden; text-overflow: ellipsis; }
+    .rej-table tr.rej-accepted td:first-child { border-left: 3px solid #3fb950; }
+    .rej-table tr.rej-rejected td:first-child { border-left: 3px solid #484f58; }
+    .rej-sym { font-weight: bold; color: #58a6ff; }
+    .rej-score-strong    { color: #86efac; font-weight: bold; }
+    .rej-score-tradeable { color: #6ee7b7; font-weight: bold; }
+    .rej-score-weak      { color: #fcd34d; }
+    .rej-score-skip      { color: #fca5a5; }
+    .rej-reason { color: #8b949e; font-size: 10px; font-style: italic; }
+
+    /* Ranker metrics card inner */
+    .ranker-metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+    .vol-chip { display: inline-block; background: #0d1117; border: 1px solid #21262d; border-radius: 3px; padding: 3px 8px; font-size: 11px; margin-right: 4px; }
+    .vol-chip .vc-sym { color: #58a6ff; font-weight: bold; }
+    .vol-chip .vc-sig { color: #e3b341; }
   </style>
 </head>
 <body>
@@ -90,6 +131,49 @@
   <div class="stat-card"><div class="label">Win Rate</div><div class="value" id="s-wr">—</div></div>
   <div class="stat-card"><div class="label">Sharpe</div><div class="value" id="s-sharpe">—</div></div>
   <div class="stat-card"><div class="label">Max Drawdown</div><div class="value" id="s-mdd">—</div></div>
+</div>
+
+<!-- Decision funnel (why is / isn't the bot trading?) -->
+<section>
+  <h2>Decision Funnel — last 10 min</h2>
+  <div class="funnel" id="funnel">
+    <div class="funnel-stage fs-raw"><div class="fs-n" id="f-raw">—</div><div class="fs-l">in feed</div></div>
+    <div class="funnel-arrow">→</div>
+    <div class="funnel-stage fs-evaluated"><div class="fs-n" id="f-eval">—</div><div class="fs-l">evaluated</div></div>
+    <div class="funnel-arrow">→</div>
+    <div class="funnel-stage fs-ranker-out"><div class="fs-n" id="f-rout">—</div><div class="fs-l">ranker rejected</div></div>
+    <div class="funnel-arrow">→</div>
+    <div class="funnel-stage fs-router-out"><div class="fs-n" id="f-rrout">—</div><div class="fs-l">router rejected</div></div>
+    <div class="funnel-arrow">→</div>
+    <div class="funnel-stage fs-accepted"><div class="fs-n" id="f-acc">—</div><div class="fs-l">accepted</div></div>
+    <div class="funnel-arrow">→</div>
+    <div class="funnel-stage fs-traded"><div class="fs-n" id="f-trade">—</div><div class="fs-l">trades opened</div></div>
+  </div>
+  <div style="font-size:10px;color:#6e7681;margin-top:6px" id="funnel-stages"></div>
+</section>
+
+<!-- Ranker stats + Recent rejections side by side -->
+<div class="two-col">
+  <section>
+    <h2>LLM Ranker (MiniMax M2.7)</h2>
+    <div class="ranker-metrics">
+      <div class="metric"><div class="k">API calls</div><div class="v" id="rk-calls">—</div></div>
+      <div class="metric"><div class="k">Total cost</div><div class="v" id="rk-cost">—</div></div>
+      <div class="metric"><div class="k">Cache hit rate</div><div class="v" id="rk-hit">—</div></div>
+      <div class="metric"><div class="k">Avg / call</div><div class="v" id="rk-avg">—</div></div>
+    </div>
+    <div style="font-size:10px;color:#6e7681;margin-top:10px;margin-bottom:3px">SCORE DISTRIBUTION (last hour)</div>
+    <div class="rank-dist" id="rk-dist"></div>
+    <div style="font-size:10px;color:#6e7681;margin-top:10px;margin-bottom:3px">REALIZED VOLATILITY (Binance 1h klines)</div>
+    <div id="rk-vol"><span style="color:#6e7681;font-size:11px">No data yet</span></div>
+  </section>
+
+  <section>
+    <h2>Recent Decisions (last 20)</h2>
+    <table class="rej-table">
+      <tbody id="rej-tbody"><tr><td colspan="1" class="empty">Loading…</td></tr></tbody>
+    </table>
+  </section>
 </div>
 
 <!-- Equity curve + Analytics side by side -->
@@ -259,7 +343,7 @@ function drawEquity(points) {
 
 async function refresh() {
   try {
-    const [st, an, wallet, curve, journal, markets, whales, trades] = await Promise.all([
+    const [st, an, wallet, curve, journal, markets, whales, trades, funnel, rejections, rk] = await Promise.all([
       fetchJSON('/state'),
       fetchJSON('/analytics'),
       fetchJSON('/wallet'),
@@ -268,6 +352,9 @@ async function refresh() {
       fetchJSON('/live-markets'),
       fetchJSON('/whale-activity'),
       fetchJSON('/trades'),
+      fetchJSON('/funnel?window_s=600').catch(() => null),
+      fetchJSON('/rejections?limit=20').catch(() => []),
+      fetchJSON('/ranker-stats?window_s=3600').catch(() => null),
     ]);
     setError('');
 
@@ -336,6 +423,71 @@ async function refresh() {
       ddBar.style.width = Math.min(100, ddPct*5)+'%';
       ddBar.className = 'risk-bar-fill ' + (ddPct > 10 ? 'risk-crit' : ddPct > 5 ? 'risk-warn' : 'risk-ok');
     }
+
+    // Decision funnel
+    if (funnel) {
+      $('f-raw').textContent    = funnel.raw_in_feed ?? 0;
+      $('f-eval').textContent   = funnel.evaluated ?? 0;
+      $('f-rout').textContent   = funnel.rejected_ranker ?? 0;
+      $('f-rrout').textContent  = funnel.rejected_router ?? 0;
+      $('f-acc').textContent    = funnel.accepted ?? 0;
+      $('f-trade').textContent  = funnel.trades_opened ?? 0;
+      const stages = funnel.by_stage || {};
+      const stageKeys = Object.keys(stages).filter(k => k !== 'ranker').sort((a,b) => stages[b] - stages[a]);
+      $('funnel-stages').innerHTML = stageKeys.length
+        ? 'Router reject breakdown: ' + stageKeys.map(k => `${k}:${stages[k]}`).join(' · ')
+        : '';
+    }
+
+    // Ranker stats
+    if (rk) {
+      $('rk-calls').textContent = rk.total_api_calls ?? 0;
+      $('rk-cost').textContent  = '$' + (rk.total_cost_usd ?? 0).toFixed(4);
+      $('rk-hit').textContent   = ((rk.cache_hit_rate ?? 0) * 100).toFixed(0) + '%';
+      $('rk-avg').textContent   = '$' + (rk.avg_cost_per_call ?? 0).toFixed(4);
+
+      const dist = rk.distribution || {};
+      const total = (dist.strong||0) + (dist.tradeable||0) + (dist.weak||0) + (dist.skip||0) + (dist.no_score||0);
+      const pct = n => total > 0 ? Math.max(1, Math.round(n/total*100)) : 0;
+      const segs = [
+        ['strong', 'rd-strong', 'STRONG ≥0.7', dist.strong||0],
+        ['tradeable', 'rd-tradeable', 'TRADE 0.5-0.7', dist.tradeable||0],
+        ['weak', 'rd-weak', 'WEAK 0.3-0.5', dist.weak||0],
+        ['skip', 'rd-skip', 'SKIP <0.3', dist.skip||0],
+        ['noscore', 'rd-noscore', 'no score', dist.no_score||0],
+      ];
+      $('rk-dist').innerHTML = total > 0
+        ? segs.filter(s => s[3] > 0).map(([_,cls,lab,n]) =>
+            `<div class="rank-dist-seg ${cls}" style="flex:${n}" title="${lab}: ${n}">${n}</div>`).join('')
+        : '<div style="color:#6e7681;font-size:11px;padding:4px 8px">No scores yet</div>';
+
+      const vol = rk.volatility || {};
+      const volKeys = Object.keys(vol);
+      $('rk-vol').innerHTML = volKeys.length
+        ? volKeys.map(s => `<span class="vol-chip"><span class="vc-sym">${s}</span> σ=<span class="vc-sig">${vol[s].sigma_pct.toFixed(1)}%</span> <span style="color:#6e7681">${fmt.dur(vol[s].age_s)} old</span></span>`).join('')
+        : '<span style="color:#6e7681;font-size:11px">Not fetched yet</span>';
+    }
+
+    // Recent rejections
+    $('rej-tbody').innerHTML = rejections.length ? rejections.map(r => {
+      const scoreCls = r.ranker_score == null ? '' :
+        r.ranker_score >= 0.7 ? 'rej-score-strong' :
+        r.ranker_score >= 0.5 ? 'rej-score-tradeable' :
+        r.ranker_score >= 0.3 ? 'rej-score-weak' : 'rej-score-skip';
+      const scoreStr = r.ranker_score != null ? r.ranker_score.toFixed(2) : '—';
+      const stage = r.verdict === 'accepted' ? 'ACCEPTED' : r.reject_stage.toUpperCase();
+      const rowCls = r.verdict === 'accepted' ? 'rej-accepted' : 'rej-rejected';
+      const mainReason = r.verdict === 'accepted'
+        ? (r.ranker_reason || 'passed all filters')
+        : (r.reject_stage === 'ranker' ? r.ranker_reason : r.reject_reason);
+      return `<tr class="${rowCls}">
+        <td style="width:40px"><span class="rej-sym">${r.crypto_symbol}</span></td>
+        <td style="width:45px" class="${scoreCls}">${scoreStr}</td>
+        <td style="width:90px"><span style="color:${r.verdict==='accepted'?'#3fb950':'#8b949e'}">${stage}</span></td>
+        <td><span style="color:#c9d1d9">${fmt.short(r.question, 60)}</span><br><span class="rej-reason">${fmt.short(mainReason || '', 140)}</span></td>
+        <td style="width:50px;color:#6e7681;text-align:right">${r.time_to_expiry_h}h</td>
+      </tr>`;
+    }).join('') : '<tr><td class="empty">No decisions logged yet</td></tr>';
 
     // Equity curve
     drawEquity(curve);
